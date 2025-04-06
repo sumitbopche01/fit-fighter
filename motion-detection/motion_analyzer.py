@@ -75,16 +75,39 @@ class ExerciseDetector:
 class PunchDetector(ExerciseDetector):
     """Detects punching motion."""
 
-    def __init__(self, velocity_threshold=0.05, confidence_threshold=0.6):
+    def __init__(
+        self,
+        velocity_threshold=0.08,
+        confidence_threshold=0.6,
+        cooldown_frames=8,
+        direction_weight=0.4,
+    ):
         """
         Initialize the punch detector.
 
         Args:
             velocity_threshold: Minimum velocity to consider a punch
             confidence_threshold: Minimum landmark visibility to consider valid
+            cooldown_frames: Number of frames to wait before detecting another punch
+            direction_weight: Weight to apply to forward motion (z-axis)
         """
         self.velocity_threshold = velocity_threshold
         self.confidence_threshold = confidence_threshold
+        self.cooldown_frames = cooldown_frames
+        self.direction_weight = direction_weight
+        self.cooldown_counter = 0
+        self.consecutive_frames_required = (
+            1  # Boxers punch fast, so we need quicker detection
+        )
+        self.consecutive_detection_counter = 0
+        self.last_detection_state = False
+        # Debug info
+        self.debug_info = {
+            "left_vel": 0,
+            "right_vel": 0,
+            "left_dir": False,
+            "right_dir": False,
+        }
 
     def detect(self, landmark_history):
         """
@@ -96,41 +119,369 @@ class PunchDetector(ExerciseDetector):
         Returns:
             bool: True if punch detected, False otherwise
         """
-        if len(landmark_history) < 2:
+        # Apply cooldown if active
+        if self.cooldown_counter > 0:
+            self.cooldown_counter -= 1
             return False
 
-        # Get current and previous landmarks
+        if len(landmark_history) < 3:  # Need at least 3 frames for better detection
+            return False
+
+        # Get landmarks from last three frames
         current = landmark_history[-1]
         previous = landmark_history[-2]
+        prev_prev = landmark_history[-3]
 
         # Check if landmarks are valid
-        if not current or not previous:
+        if not current or not previous or not prev_prev:
             return False
 
-        # Calculate wrist velocity for both hands
+        # Get indices for all required landmarks
         left_wrist_idx = LANDMARK_INDICES["left_wrist"]
         right_wrist_idx = LANDMARK_INDICES["right_wrist"]
+        left_shoulder_idx = LANDMARK_INDICES["left_shoulder"]
+        right_shoulder_idx = LANDMARK_INDICES["right_shoulder"]
+        left_elbow_idx = LANDMARK_INDICES["left_elbow"]
+        right_elbow_idx = LANDMARK_INDICES["right_elbow"]
+        nose_idx = LANDMARK_INDICES["nose"]  # For determining body orientation
 
         # Check if landmarks have sufficient visibility
-        if (
-            current[left_wrist_idx][3] < self.confidence_threshold
-            and current[right_wrist_idx][3] < self.confidence_threshold
-        ):
+        left_visible = (
+            current[left_wrist_idx][3] >= self.confidence_threshold
+            and current[left_shoulder_idx][3] >= self.confidence_threshold
+            and current[left_elbow_idx][3] >= self.confidence_threshold
+        )
+
+        right_visible = (
+            current[right_wrist_idx][3] >= self.confidence_threshold
+            and current[right_shoulder_idx][3] >= self.confidence_threshold
+            and current[right_elbow_idx][3] >= self.confidence_threshold
+        )
+
+        if not left_visible and not right_visible:
+            self.consecutive_detection_counter = 0
             return False
 
-        # Calculate velocity
-        left_velocity = self._calculate_velocity(
-            current[left_wrist_idx], previous[left_wrist_idx]
-        )
-        right_velocity = self._calculate_velocity(
-            current[right_wrist_idx], previous[right_wrist_idx]
+        # Determine body orientation (which way user is facing)
+        # This helps adjust for boxing stance where punches might have horizontal components
+        body_orientation = self._determine_body_orientation(
+            current, nose_idx, left_shoulder_idx, right_shoulder_idx
         )
 
-        # Detect punch if either wrist has high forward velocity
-        return (
-            left_velocity > self.velocity_threshold
-            or right_velocity > self.velocity_threshold
+        # Calculate velocity and check for punch motion
+        left_punch = False
+        right_punch = False
+
+        if left_visible:
+            # Calculate wrist velocity considering both forward and horizontal components
+            left_wrist_vel = self._calculate_boxing_velocity(
+                current[left_wrist_idx],
+                previous[left_wrist_idx],
+                current[left_shoulder_idx],
+                previous[left_shoulder_idx],
+                body_orientation,
+                "left",
+            )
+
+            # Check directional motion (depends on boxing stance)
+            left_direction = self._is_punch_direction(
+                current[left_wrist_idx],
+                previous[left_wrist_idx],
+                prev_prev[left_wrist_idx],
+                body_orientation,
+                "left",
+            )
+
+            # Arms don't always need to be fully extending in boxing
+            left_extending = self._is_boxing_extension(
+                current[left_shoulder_idx],
+                current[left_elbow_idx],
+                current[left_wrist_idx],
+                previous[left_shoulder_idx],
+                previous[left_elbow_idx],
+                previous[left_wrist_idx],
+            )
+
+            # Store debug info
+            self.debug_info["left_vel"] = left_wrist_vel
+            self.debug_info["left_dir"] = left_direction
+
+            left_punch = left_wrist_vel > self.velocity_threshold and left_direction
+
+        if right_visible:
+            # Calculate wrist velocity
+            right_wrist_vel = self._calculate_boxing_velocity(
+                current[right_wrist_idx],
+                previous[right_wrist_idx],
+                current[right_shoulder_idx],
+                previous[right_shoulder_idx],
+                body_orientation,
+                "right",
+            )
+
+            # Check direction
+            right_direction = self._is_punch_direction(
+                current[right_wrist_idx],
+                previous[right_wrist_idx],
+                prev_prev[right_wrist_idx],
+                body_orientation,
+                "right",
+            )
+
+            # Check extension
+            right_extending = self._is_boxing_extension(
+                current[right_shoulder_idx],
+                current[right_elbow_idx],
+                current[right_wrist_idx],
+                previous[right_shoulder_idx],
+                previous[right_elbow_idx],
+                previous[right_wrist_idx],
+            )
+
+            # Store debug info
+            self.debug_info["right_vel"] = right_wrist_vel
+            self.debug_info["right_dir"] = right_direction
+
+            right_punch = right_wrist_vel > self.velocity_threshold and right_direction
+
+        # Check if either hand is punching
+        current_detection = left_punch or right_punch
+
+        # Require consecutive frames for more robust detection (reduced for boxing)
+        if current_detection:
+            self.consecutive_detection_counter += 1
+        else:
+            self.consecutive_detection_counter = 0
+
+        is_punch = (
+            self.consecutive_detection_counter >= self.consecutive_frames_required
         )
+
+        # Start cooldown when a punch is detected
+        if is_punch and not self.last_detection_state:
+            self.cooldown_counter = self.cooldown_frames
+
+        self.last_detection_state = is_punch
+        return is_punch
+
+    def _determine_body_orientation(
+        self, landmarks, nose_idx, left_shoulder_idx, right_shoulder_idx
+    ):
+        """
+        Determine which way the user is facing based on shoulder and nose positions.
+
+        Returns:
+            dict: Containing orientation information (side_facing, left_forward)
+        """
+        # Check if user is facing sideways based on shoulder alignment with camera
+        shoulders_x_diff = abs(
+            landmarks[left_shoulder_idx][0] - landmarks[right_shoulder_idx][0]
+        )
+        shoulders_z_diff = abs(
+            landmarks[left_shoulder_idx][2] - landmarks[right_shoulder_idx][2]
+        )
+
+        # If x difference is small and z difference is large, user is likely sideways
+        side_facing = shoulders_z_diff > shoulders_x_diff
+
+        # Determine which side is forward
+        left_forward = False
+        if side_facing:
+            left_forward = (
+                landmarks[left_shoulder_idx][2] < landmarks[right_shoulder_idx][2]
+            )
+
+        return {"side_facing": side_facing, "left_forward": left_forward}
+
+    def _calculate_boxing_velocity(
+        self,
+        wrist_current,
+        wrist_prev,
+        shoulder_current,
+        shoulder_prev,
+        orientation,
+        side,
+    ):
+        """
+        Calculate punch velocity accounting for boxing stance.
+
+        Args:
+            wrist_current, wrist_prev: Wrist positions
+            shoulder_current, shoulder_prev: Shoulder positions
+            orientation: Body orientation information
+            side: "left" or "right" to indicate which arm
+
+        Returns:
+            float: Velocity magnitude adjusted for boxing stance
+        """
+        # Calculate wrist movement relative to shoulder
+        wrist_rel_current = [
+            wrist_current[0] - shoulder_current[0],  # x - horizontal sideways
+            wrist_current[1] - shoulder_current[1],  # y - vertical
+            wrist_current[2] - shoulder_current[2],  # z - depth
+        ]
+
+        wrist_rel_prev = [
+            wrist_prev[0] - shoulder_prev[0],
+            wrist_prev[1] - shoulder_prev[1],
+            wrist_prev[2] - shoulder_prev[2],
+        ]
+
+        # Calculate change in relative position
+        dx = wrist_rel_current[0] - wrist_rel_prev[0]  # Horizontal change
+        dy = wrist_rel_current[1] - wrist_rel_prev[1]  # Vertical change
+        dz = wrist_rel_prev[2] - wrist_rel_current[2]  # Forward change (inverted)
+
+        # For a boxer stance, we should weigh the horizontal component more
+        # depending on which way they're facing
+        if orientation["side_facing"]:
+            # In side stance, horizontal movement is more important
+            # and the forward arm uses more x-movement while the back arm uses more z-movement
+            if (orientation["left_forward"] and side == "left") or (
+                not orientation["left_forward"] and side == "right"
+            ):
+                # Forward arm: emphasize x movement
+                return abs(dx) * 1.5 + dz * self.direction_weight + abs(dy) * 0.3
+            else:
+                # Back arm: emphasize z movement
+                return (
+                    abs(dx) * 0.7 + dz * (self.direction_weight * 1.5) + abs(dy) * 0.3
+                )
+        else:
+            # Front facing stance - more balanced
+            return dz * self.direction_weight + math.sqrt(dx**2 + dy**2)
+
+    def _is_punch_direction(self, current, previous, prev_prev, orientation, side):
+        """
+        Check if movement direction is consistent with punching in boxing stance.
+
+        Args:
+            current, previous, prev_prev: Landmark positions
+            orientation: Body orientation information
+            side: "left" or "right" to indicate which arm
+
+        Returns:
+            bool: True if direction matches punch motion
+        """
+        # Calculate differences in each dimension
+        x_diff = current[0] - previous[0]
+        y_diff = current[1] - previous[1]
+        z_diff = previous[2] - current[2]  # Inverted because z decreases moving forward
+
+        # For boxing stance, the direction depends on which arm and orientation
+        if orientation["side_facing"]:
+            # For side stance, the leading arm punches more horizontally
+            # while the rear arm punches more forward
+            if (orientation["left_forward"] and side == "left") or (
+                not orientation["left_forward"] and side == "right"
+            ):
+                # Leading arm - should have significant horizontal component in correct direction
+                correct_x_direction = (side == "left" and x_diff > 0.005) or (
+                    side == "right" and x_diff < -0.005
+                )
+                return (
+                    correct_x_direction and abs(y_diff) < 0.05
+                )  # Not much vertical movement
+            else:
+                # Rear arm - should have forward component
+                return (
+                    z_diff > 0.005 and abs(y_diff) < 0.05
+                )  # Moving forward, not much vertical
+        else:
+            # Front facing - more traditional forward punch
+            return (
+                z_diff > 0.005 and abs(y_diff) < 0.05
+            )  # Moving forward, not much vertical
+
+    def _is_boxing_extension(
+        self,
+        shoulder_current,
+        elbow_current,
+        wrist_current,
+        shoulder_prev,
+        elbow_prev,
+        wrist_prev,
+    ):
+        """
+        Check if the arm motion resembles a boxing punch extension.
+
+        Boxing punches often don't fully extend the arm, so we're less strict.
+
+        Returns:
+            bool: True if extension matches boxing punch
+        """
+        # Calculate current and previous distances from shoulder to wrist
+        current_dist = math.sqrt(
+            (shoulder_current[0] - wrist_current[0]) ** 2
+            + (shoulder_current[1] - wrist_current[1]) ** 2
+            + (shoulder_current[2] - wrist_current[2]) ** 2
+        )
+
+        prev_dist = math.sqrt(
+            (shoulder_prev[0] - wrist_prev[0]) ** 2
+            + (shoulder_prev[1] - wrist_prev[1]) ** 2
+            + (shoulder_prev[2] - wrist_prev[2]) ** 2
+        )
+
+        # For boxing, we just need some extension, not necessarily full
+        return current_dist > prev_dist * 1.01  # Just 1% increase is enough
+
+    def _calculate_relative_velocity(
+        self, wrist_current, wrist_prev, shoulder_current, shoulder_prev
+    ):
+        """
+        Calculate the velocity of wrist relative to shoulder to filter out body movement.
+
+        Args:
+            wrist_current: Current wrist position
+            wrist_prev: Previous wrist position
+            shoulder_current: Current shoulder position
+            shoulder_prev: Previous shoulder position
+
+        Returns:
+            float: Relative velocity magnitude
+        """
+        # Calculate wrist movement relative to shoulder
+        wrist_rel_current = [
+            wrist_current[0] - shoulder_current[0],
+            wrist_current[1] - shoulder_current[1],
+            wrist_current[2] - shoulder_current[2],
+        ]
+
+        wrist_rel_prev = [
+            wrist_prev[0] - shoulder_prev[0],
+            wrist_prev[1] - shoulder_prev[1],
+            wrist_prev[2] - shoulder_prev[2],
+        ]
+
+        # Calculate change in relative position
+        dx = wrist_rel_current[0] - wrist_rel_prev[0]
+        dy = wrist_rel_current[1] - wrist_rel_prev[1]
+        dz = (
+            wrist_rel_prev[2] - wrist_rel_current[2]
+        )  # Inverted because z gets smaller as you move forward
+
+        # Apply directional weight to emphasize forward motion
+        return dz * self.direction_weight + math.sqrt(dx**2 + dy**2)
+
+    def _is_forward_motion(self, current, previous, prev_prev):
+        """
+        Check if the motion is predominantly forward.
+
+        Args:
+            current: Current landmark position
+            previous: Previous landmark position
+            prev_prev: Position from two frames ago
+
+        Returns:
+            bool: True if motion is forward, False otherwise
+        """
+        # Z decreases as you move forward in camera space
+        z_diff_current = previous[2] - current[2]
+        z_diff_prev = prev_prev[2] - previous[2]
+
+        # Consistent forward motion across frames
+        return z_diff_current > 0.005  # Reduced threshold for detection
 
     def _calculate_velocity(self, current, previous):
         """
@@ -151,7 +502,9 @@ class PunchDetector(ExerciseDetector):
         y_velocity = current[1] - previous[1]
 
         # Return velocity magnitude with emphasis on forward motion
-        return z_velocity * 2 + math.sqrt(x_velocity**2 + y_velocity**2)
+        return z_velocity * self.direction_weight + math.sqrt(
+            x_velocity**2 + y_velocity**2
+        )
 
 
 class SquatDetector(ExerciseDetector):
@@ -412,6 +765,28 @@ class PlankDetector(ExerciseDetector):
 
         # A straight line would be close to 180 degrees
         return abs(angle - 170) < 20
+
+    def _calculate_angle(self, p1, p2, p3):
+        """
+        Calculate the angle between three points.
+
+        Args:
+            p1, p2, p3: Points as (x, y, z, visibility) tuples
+
+        Returns:
+            float: Angle in degrees
+        """
+        a = np.array([p1[0], p1[1]])
+        b = np.array([p2[0], p2[1]])
+        c = np.array([p3[0], p3[1]])
+
+        ba = a - b
+        bc = c - b
+
+        cosine_angle = np.dot(ba, bc) / (np.linalg.norm(ba) * np.linalg.norm(bc))
+        angle = np.arccos(np.clip(cosine_angle, -1.0, 1.0))
+
+        return np.degrees(angle)
 
     def _calculate_distance(self, p1, p2):
         """
