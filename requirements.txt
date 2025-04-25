@@ -1,0 +1,20 @@
+# Core dependencies
+numpy>=1.24.3
+opencv-python>=4.5.0
+mediapipe>=0.8.9
+
+# Analysis and visualization
+matplotlib>=3.7.3
+pandas>=2.0.3
+scikit-learn>=1.3.0
+pillow>=10.0.1
+
+# Tensorflow (optional, used for custom models)
+tensorflow>=2.13.0
+
+# Communication
+websockets>=11.0.3
+
+# Development and testing
+pytest>=6.0.0
+jupyter>=1.0.0 

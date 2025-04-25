@@ -1,32 +1,98 @@
 # FitFighter Unity Project
 
-This directory will contain the Unity project for FitFighter, which will receive
-motion data from the motion detection module and visualize it in an interactive
+This directory contains the Unity project for FitFighter, which receives motion
+data from the Python motion detection module and visualizes it in an interactive
 game environment.
 
-## Setup
+## Setup Instructions
 
-1. Download and install Unity Hub from [unity.com](https://unity.com/download)
-2. Install Unity 2022.3 LTS through Unity Hub
-3. Open this directory as a project in Unity Hub
+### Prerequisites
+
+1. Unity 2022.3 LTS or newer
+2. TextMeshPro package
+3. NativeWebSocket package
+
+### Setting Up the Unity Project
+
+1. **Create a new Unity project**:
+   - Open Unity Hub
+   - Click "New Project"
+   - Select "3D" template
+   - Name it "FitFighter"
+   - Set the location to this `/unity` directory
+   - Click "Create Project"
+
+2. **Install required packages**:
+   - In Unity, go to Window > Package Manager
+   - Click the "+" button and select "Add package from git URL..."
+   - Add the NativeWebSocket package:
+     `https://github.com/endel/NativeWebSocket.git`
+   - Install TextMeshPro package if not already included
+
+3. **Import the scripts**:
+   - Create a "Scripts" folder in your Assets directory
+   - Copy the provided C# scripts into this folder:
+     - `MotionDataReceiver.cs`
+     - `MotionControlledObject.cs`
+     - `ConnectionStatusUI.cs`
+
+4. **Set up the scene**:
+   - Create a new scene or use the default one
+   - Add a cube to the scene (this will be controlled by your movements)
+   - Add the `MotionControlledObject` component to the cube
+   - Create an empty GameObject and add the `MotionDataReceiver` component to it
+   - In the Inspector, drag the `MotionDataReceiver` into the field on the
+     `MotionControlledObject`
+
+5. **Set up the UI**:
+   - Create a Canvas for UI elements
+   - Add TextMeshPro elements for status text and instructions
+   - Create a status panel
+   - Add a reconnect button
+   - Add the `ConnectionStatusUI` component to the Canvas
+   - Configure the references in the Inspector
+
+### Running the Application
+
+1. Start the Python motion detection application with the `--unity-mode` flag:
+   ```bash
+   cd motion-detection
+   python main.py --unity-mode
+   ```
+
+2. Run the Unity project
+   - The cube should respond to your movements detected by the Python
+     application
+   - Punch: The cube moves forward
+   - Squat: The cube moves down
+   - Plank: The cube stabilizes
 
 ## Project Structure
 
-The Unity project will be organized as follows:
+- `Scripts/`: Contains the C# scripts for the application
+  - `MotionDataReceiver.cs`: Handles WebSocket communication with the Python
+    application
+  - `MotionControlledObject.cs`: Controls the game object based on motion data
+  - `ConnectionStatusUI.cs`: Manages the UI for connection status and
+    instructions
 
-- `/Assets/Scripts/`: C# scripts for game logic
-- `/Assets/Scenes/`: Unity scenes
-- `/Assets/Models/`: 3D models and assets
-- `/Assets/Materials/`: Materials and textures
-- `/Assets/Prefabs/`: Reusable game objects
-- `/Assets/Plugins/`: External plugins and libraries
+## Customization
 
-## Implementation Plan
+- Adjust the movement parameters in the `MotionControlledObject` component:
+  - `Punch Force`: How far the object moves when a punch is detected
+  - `Squat Height`: How far down the object moves when a squat is detected
+  - `Return Speed`: How quickly the object returns to its original position
+  - `Plank Stabilization Factor`: How much the object's movement is reduced when
+    a plank is detected
 
-1. Set up basic 3D environment
-2. Implement data receiver to process motion data from the Python module
-3. Create simple visualization of detected exercises
-4. Develop basic game mechanics for proof of concept
+## Troubleshooting
+
+- If the Unity application can't connect to the Python WebSocket server:
+  - Ensure the Python application is running with the `--unity-mode` flag
+  - Check that the WebSocket URL in the `MotionDataReceiver` component matches
+    the Python server address
+  - Try clicking the reconnect button in the UI
+  - Check your firewall settings if running on different machines
 
 ## Communication with Motion Detection
 
